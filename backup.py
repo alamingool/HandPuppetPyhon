@@ -114,68 +114,52 @@ def calculate_distance(p1, p2):
 
 # --- Video Processing Thread ---
 # (No changes needed in video_processing_loop itself for this GUI behavior change)
-# --- Video Processing with dedicated capture thread ---
 def video_processing_loop(settings, frame_q, stop_flag):
     global sock
     print("[PY THREAD] Video thread starting...")
     mp_drawing = mp.solutions.drawing_utils
     mp_hands = mp.solutions.hands
+    hands = None; cap = None
 
-    # Initialize MediaPipe Hands
-    hands = mp_hands.Hands(
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-        model_complexity=1,
-        static_image_mode=False,
-        max_num_hands=2
-    )
-
-    # Open camera
-    cap = cv2.VideoCapture(settings['camera_index'], cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        raise IOError(f"Cannot open camera {settings['camera_index']}")
-
-    # Set resolution
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, settings['width'])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, settings['height'])
-    time.sleep(0.2)
-    frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"[PY THREAD] Using resolution {frame_w}x{frame_h}")
-
-    # Prepare UDP socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    # Dedicated capture thread to always grab latest frame
-    capture_queue = queue.Queue(maxsize=1)
-    def capture_loop():
-        while not stop_flag.is_set():
-            ret, raw = cap.read()
-            if not ret:
-                continue
-            # keep only most recent
-            if capture_queue.full():
-                try: capture_queue.get_nowait()
-                except queue.Empty: pass
-            capture_queue.put(raw)
-    cap_thread = threading.Thread(target=capture_loop, daemon=True)
-    cap_thread.start()
-    print("[PY THREAD] Capture thread started.")
+    frame_w, frame_h = settings['width'], settings['height']
+    left_cb_color = (0, 0, 255); right_cb_color = (255, 255, 0)
 
     try:
+        print("[PY THREAD] Initializing MediaPipe Hands...")
+        hands = mp_hands.Hands(min_detection_confidence=0.5, min_tracking_confidence=0.5,
+                               model_complexity=1, static_image_mode=False, max_num_hands=2)
+        print("[PY THREAD] Opening Camera...")
+        cap = cv2.VideoCapture(settings['camera_index'], cv2.CAP_DSHOW)
+        if not cap or not cap.isOpened(): raise IOError(f"Cannot open camera {settings['camera_index']}")
+        print("[PY THREAD] Camera opened.")
+
+        print("[PY THREAD] Setting camera resolution...")
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, settings['width'])
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, settings['height'])
+        time.sleep(0.2)
+        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"[PY THREAD] Requested Res: {settings['width']}x{settings['height']}, Actual Res: {actual_width}x{actual_height}")
+        if actual_width != settings['width'] or actual_height != settings['height']:
+             print(f"[PY THREAD] Warning: Actual resolution differs. Using {actual_width}x{actual_height}.")
+             frame_w, frame_h = actual_width, actual_height
+
+        print("[PY THREAD] Creating UDP socket...")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print("[PY THREAD] UDP socket created.")
+        print("[PY THREAD] Starting video capture loop...")
         frame_count = 0
-        last_left = DEFAULT_LEFT_CB.copy()
-        last_right = DEFAULT_RIGHT_CB.copy()
+        last_left_cb = DEFAULT_LEFT_CB.copy()
+        last_right_cb = DEFAULT_RIGHT_CB.copy()
 
         while not stop_flag.is_set():
-            try:
-                frame = capture_queue.get(timeout=1.0)
-            except queue.Empty:
-                continue
+            success, frame = cap.read()
+            if not success:
+                print(f"[PY THREAD] Frame {frame_count}: Failed to grab frame.")
+                time.sleep(0.1); continue
 
             frame = cv2.flip(frame, 1)
 
-            # read control box vars
             try:
                 left_cb = {
                     'x': settings['left_x_var'].get(), 'y': settings['left_y_var'].get(),
@@ -185,70 +169,92 @@ def video_processing_loop(settings, frame_q, stop_flag):
                     'x': settings['right_x_var'].get(), 'y': settings['right_y_var'].get(),
                     'w': settings['right_w_var'].get(), 'h': settings['right_h_var'].get()
                 }
-                last_left = left_cb.copy(); last_right = right_cb.copy()
-            except Exception:
-                left_cb = last_left.copy(); right_cb = last_right.copy()
+                last_left_cb = left_cb.copy()
+                last_right_cb = right_cb.copy()
+            except Exception as e:
+                print(f"[PY THREAD WARNING] Error reading Tkinter vars: {e}. Using last known values.")
+                left_cb = last_left_cb.copy()
+                right_cb = last_right_cb.copy()
 
-            # pixel coords
-            left_px = {k: int(v * frame_w) for k, v in left_cb.items()}
-            right_px = {k: int(v * frame_w) if k in ['x','w'] else int(v * frame_h) for k,v in right_cb.items()}
+            left_cb_px = { "x": int(left_cb['x'] * frame_w), "y": int(left_cb['y'] * frame_h), "w": int(left_cb['w'] * frame_w), "h": int(left_cb['h'] * frame_h) }
+            right_cb_px = { "x": int(right_cb['x'] * frame_w), "y": int(right_cb['y'] * frame_h), "w": int(right_cb['w'] * frame_w), "h": int(right_cb['h'] * frame_h) }
 
-            # draw zones
-            cv2.rectangle(frame, (left_px['x'], left_px['y']),
-( left_px['x']+left_px['w'], left_px['y']+left_px['h']), (0,0,255),2)
-            cv2.rectangle(frame, (right_px['x'], right_px['y']),
-( right_px['x']+right_px['w'], right_px['y']+right_px['h']), (255,255,0),2)
+            cv2.rectangle(frame, (left_cb_px['x'], left_cb_px['y']), (left_cb_px['x'] + left_cb_px['w'], left_cb_px['y'] + left_cb_px['h']), left_cb_color, 2)
+            cv2.rectangle(frame, (right_cb_px['x'], right_cb_px['y']), (right_cb_px['x'] + right_cb_px['w'], right_cb_px['y'] + right_cb_px['h']), right_cb_color, 2)
 
-            # hand detection
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            rgb.flags.writeable = False
-            results = hands.process(rgb)
-            rgb.flags.writeable = True
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb_frame.flags.writeable = False
+            results = hands.process(rgb_frame)
+            rgb_frame.flags.writeable = True
 
             if results.multi_hand_landmarks:
-                for idx, hand in enumerate(results.multi_hand_landmarks):
-                    hand_label = results.multi_handedness[idx].classification[0].label
-                    mp_drawing.draw_landmarks(frame, hand, mp_hands.HAND_CONNECTIONS)
-                    # ← use INDEX_FINGER_TIP instead of WRIST
-                    tip = hand.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
-                    wx, wy, wz = tip.x, tip.y, tip.z
-                    data = None
-                    if hand_label == "Left":
-                        if left_cb['x'] <= wx < left_cb['x']+left_cb['w'] and left_cb['y'] <= wy < left_cb['y']+left_cb['h']:
-                            rel = (wy - left_cb['y'])/left_cb['h'] if left_cb['h']>0 else 0.5
-                            val = max(0.0,min(1.0,1.0-rel))
-                            data = f"LVAL:{val:.4f}"
-                            cv2.putText(frame, f"L Val: {val:.2f}", (left_px['x'], left_px['y']-10),
-cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,0,255),2)
-                    else:
-                        if right_cb['x'] <= wx < right_cb['x']+right_cb['w'] and right_cb['y'] <= wy < right_cb['y']+right_cb['h']:
-                            rx = max(0.0,min(1.0,(wx-right_cb['x'])/right_cb['w']))
-                            ry = max(0.0,min(1.0,(wy-right_cb['y'])/right_cb['h']))
-                            invy = 1.0-ry
-                            data = f"RPOS:{rx:.4f},{invy:.4f},{wz:.4f}"
-                            cv2.putText(frame, f"R Rel: {rx:.2f},{invy:.2f}", (right_px['x'], right_px['y']-10),
-cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
-                    if data and sock:
-                        try: sock.sendto(data.encode(), (UDP_IP,UDP_PORT))
-                        except: pass
+                for hand_index, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                    handedness = "Unknown"
+                    if results.multi_handedness and len(results.multi_handedness) > hand_index:
+                         handedness = results.multi_handedness[hand_index].classification[0].label
+                    else: continue
 
-            # enqueue for GUI
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            while frame_q.qsize()>=frame_q.maxsize:
-                try: frame_q.get_nowait()
-                except: break
-            frame_q.put(rgb_frame, block=False)
-            frame_count +=1
+                    mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                    data_string = None
+                    wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
+                    wrist_x_norm, wrist_y_norm, wrist_z = wrist.x, wrist.y, wrist.z
 
-    except Exception as e:
-        print(f"[PY THREAD ERROR] {e}"); traceback.print_exc()
+                    if handedness == "Left":
+                        is_in_zone = (left_cb['x'] <= wrist_x_norm < left_cb['x'] + left_cb['w'] and
+                                      left_cb['y'] <= wrist_y_norm < left_cb['y'] + left_cb['h'])
+                        if is_in_zone:
+                            zone_h = left_cb['h']
+                            rel_y_in_zone = (wrist_y_norm - left_cb['y']) / zone_h if zone_h > 0.001 else 0.5
+                            linear_value = 1.0 - rel_y_in_zone
+                            linear_value = max(0.0, min(1.0, linear_value))
+                            data_string = f"LVAL:{linear_value:.4f}"
+                            cv2.putText(frame, f"L Val: {linear_value:.2f}", (left_cb_px['x'], left_cb_px['y'] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, left_cb_color, 2)
+
+                    elif handedness == "Right":
+                        is_in_zone = (right_cb['x'] <= wrist_x_norm < right_cb['x'] + right_cb['w'] and
+                                      right_cb['y'] <= wrist_y_norm < right_cb['y'] + right_cb['h'])
+                        if is_in_zone:
+                            zone_w = right_cb['w']; zone_h = right_cb['h']
+                            rel_x = (wrist_x_norm - right_cb['x']) / zone_w if zone_w > 0.001 else 0.5
+                            rel_y = (wrist_y_norm - right_cb['y']) / zone_h if zone_h > 0.001 else 0.5
+                            rel_x = max(0.0, min(1.0, rel_x))
+                            rel_y = max(0.0, min(1.0, rel_y))
+                            rel_y_inverted = 1.0 - rel_y
+                            rel_y_inverted = max(0.0, min(1.0, rel_y_inverted))
+                            data_string = f"RPOS:{rel_x:.4f},{rel_y_inverted:.4f},{wrist_z:.4f}"
+                            cv2.putText(frame, f"R Rel: {rel_x:.2f},{rel_y_inverted:.2f}", (right_cb_px['x'], right_cb_px['y'] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, right_cb_color, 2)
+
+                    if data_string and sock:
+                        try:
+                            sock.sendto(data_string.encode('utf-8'), (UDP_IP, UDP_PORT))
+                        except Exception as e:
+                            print(f"[PY THREAD UDP ERROR] {e}")
+
+            frame_rgb_for_tk = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            try:
+                while frame_q.qsize() >= frame_q.maxsize:
+                    try: frame_q.get_nowait()
+                    except queue.Empty: break
+                frame_q.put(frame_rgb_for_tk, block=False)
+            except queue.Full: pass
+            except Exception as e: print(f"[PY THREAD ERROR] Queueing frame: {e}")
+            frame_count += 1
+
+    except IOError as e: print(f"[PY THREAD ERROR] I/O Error: {e}"); traceback.print_exc()
+    except Exception as e: print(f"[PY THREAD ERROR] Unexpected Error: {e}"); traceback.print_exc()
     finally:
-        stop_flag.set()
-        if cap_thread.is_alive(): cap_thread.join(timeout=1.0)
-        if cap and cap.isOpened(): cap.release()
-        if hands: hands.close()
-        if sock: sock.close()
         print("[PY THREAD] Cleaning up video thread...")
+        stop_flag.set()
+        if cap is not None and cap.isOpened(): cap.release(); print("[PY THREAD] Camera released.")
+        if hands: hands.close(); print("[PY THREAD] Mediapipe Hands closed.")
+        if sock:
+            try: sock.close(); print("[PY THREAD] UDP Socket closed.")
+            except Exception as e: print(f"[PY THREAD ERROR] Socket Close Error: {e}")
+            sock = None
+        while not frame_q.empty():
+            try: frame_q.get_nowait()
+            except queue.Empty: break
+        print("[PY THREAD] Video thread finished.")
 
 
 # --- Tkinter GUI Application ---
