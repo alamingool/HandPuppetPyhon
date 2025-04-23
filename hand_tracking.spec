@@ -5,7 +5,7 @@ a = Analysis(
     ['hand_tracking.py'],
     pathex=[],
     binaries=[],
-    datas=[('D:\\UnityProjects\\HandPuppetPyhon\\venv\\Lib\\site-packages\\mediapipe\\modules', 'mediapipe/modules')],
+    datas=[('D:\\UnityProjects\\HandPuppetPyhon\\venv\\Lib\\site-packages\\mediapipe\\modules', 'mediapipe/modules'), ('config.json', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
